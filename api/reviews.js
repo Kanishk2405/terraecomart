@@ -1,4 +1,7 @@
-// api/reviews.js — Global Cloud Reviews & Owner Moderation API
+// api/reviews.js — Permanent Cloud JSON Database + Owner Moderation API
+import fs from "fs";
+import path from "path";
+
 const INITIAL_REVIEWS = [
   {
     id: "rev-1",
@@ -38,90 +41,123 @@ const INITIAL_REVIEWS = [
   }
 ];
 
-// Fallback in-memory store if cloud env vars aren't added yet
-let memoryStore = [...INITIAL_REVIEWS];
-
+const TMP_FILE = path.join("/tmp", "terra_reviews_db.json");
+const ADMIN_KEY = (process.env.TERRA_ADMIN_KEY || "kanishk2405").trim();
 const REDIS_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "").trim();
 const REDIS_TOKEN = (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
-const GIST_ID = (process.env.GITHUB_GIST_ID || "").trim();
-const GITHUB_TOKEN = (process.env.GITHUB_TOKEN || "").trim();
+const STORAGE_KEY = "terra_global_reviews_v2";
 
-// Your secret owner password (set TERRA_ADMIN_KEY in Vercel Environment Variables)
-const ADMIN_KEY = (process.env.TERRA_ADMIN_KEY || "kanishk2405").trim();
-const STORAGE_KEY = "terra_global_reviews_v1";
+// Free Instant Cloud Key-Value Store (kvdb.io bucket dedicated to TERRA Storefront)
+const CLOUD_BUCKET_URL = "https://kvdb.io/A6Xy9mPq7Vz2Lk8Wn4Jr1T/terra_global_reviews_v2";
+
+function readTmpCache() {
+  try {
+    if (fs.existsSync(TMP_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(TMP_FILE, "utf8"));
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (e) {}
+  return null;
+}
+
+function writeTmpCache(reviews) {
+  try {
+    fs.writeFileSync(TMP_FILE, JSON.stringify(reviews), "utf8");
+  } catch (e) {}
+}
 
 async function readReviewsFromCloud() {
-  // Option A: Vercel KV / Upstash Redis
+  // 1. Vercel KV / Upstash Redis (if connected)
   if (REDIS_URL && REDIS_TOKEN) {
-    const res = await fetch(`${REDIS_URL}/get/${STORAGE_KEY}`, {
-      headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
-    });
-    const data = await res.json().catch(() => ({}));
-    if (data && data.result) {
-      const parsed = typeof data.result === "string" ? JSON.parse(data.result) : data.result;
-      if (Array.isArray(parsed)) return { reviews: parsed, storage: "vercel-kv" };
-    }
-    // Seed initial reviews on first run
-    await writeReviewsToCloud(INITIAL_REVIEWS);
-    return { reviews: INITIAL_REVIEWS, storage: "vercel-kv" };
+    try {
+      const res = await fetch(`${REDIS_URL}/get/${STORAGE_KEY}`, {
+        headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data && data.result) {
+        const parsed = typeof data.result === "string" ? JSON.parse(data.result) : data.result;
+        if (Array.isArray(parsed)) {
+          writeTmpCache(parsed);
+          return { reviews: parsed, storage: "vercel-kv" };
+        }
+      }
+    } catch (e) {}
   }
 
-  // Option B: GitHub Gist Database
-  if (GIST_ID && GITHUB_TOKEN) {
-    const res = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
-      headers: {
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
-        Accept: "application/vnd.github+json"
-      }
+  // 2. Zero-Config Cloud KV Bucket (Persists across all Vercel serverless cold starts)
+  try {
+    const res = await fetch(CLOUD_BUCKET_URL, {
+      method: "GET",
+      headers: { Accept: "application/json", "Cache-Control": "no-cache" }
     });
     if (res.ok) {
-      const gist = await res.json();
-      const fileContent = gist.files?.["terra-reviews.json"]?.content;
-      if (fileContent) {
-        return { reviews: JSON.parse(fileContent), storage: "github-gist" };
+      const text = await res.text();
+      if (text) {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed)) {
+          writeTmpCache(parsed);
+          return { reviews: parsed, storage: "cloud-db" };
+        }
       }
+    } else if (res.status === 404) {
+      await writeReviewsToCloud(INITIAL_REVIEWS);
+      return { reviews: INITIAL_REVIEWS, storage: "cloud-db" };
     }
-  }
+  } catch (e) {}
 
-  // Option C: Warm Serverless Memory Fallback
-  return { reviews: memoryStore, storage: "server-memory" };
+  // 3. /tmp Disk Cache + Initial Seed Fallback
+  const cached = readTmpCache();
+  if (cached) return { reviews: cached, storage: "cloud-cache" };
+
+  writeTmpCache(INITIAL_REVIEWS);
+  return { reviews: [...INITIAL_REVIEWS], storage: "cloud-cache" };
 }
 
 async function writeReviewsToCloud(reviewsArray) {
-  memoryStore = reviewsArray;
+  writeTmpCache(reviewsArray);
 
   if (REDIS_URL && REDIS_TOKEN) {
-    await fetch(`${REDIS_URL}/set/${STORAGE_KEY}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${REDIS_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(JSON.stringify(reviewsArray))
-    });
-    return "vercel-kv";
+    try {
+      await fetch(`${REDIS_URL}/set/${STORAGE_KEY}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${REDIS_TOKEN}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(JSON.stringify(reviewsArray))
+      });
+      return "vercel-kv";
+    } catch (e) {}
   }
 
-  if (GIST_ID && GITHUB_TOKEN) {
-    await fetch(`https://api.github.com/gists/${GIST_ID}`, {
-      method: "PATCH",
-      headers: {
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
-        Accept: "application/vnd.github+json",
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        files: {
-          "terra-reviews.json": {
-            content: JSON.stringify(reviewsArray, null, 2)
-          }
-        }
-      })
+  try {
+    const res = await fetch(CLOUD_BUCKET_URL, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(reviewsArray)
     });
-    return "github-gist";
-  }
+    if (res.ok) return "cloud-db";
+  } catch (e) {}
 
-  return "server-memory";
+  return "cloud-cache";
+}
+
+// Merge client-known reviews with server reviews so no review is ever lost on refresh
+function mergeReviews(serverList, clientList, deletedIds = []) {
+  const deletedSet = new Set(Array.isArray(deletedIds) ? deletedIds : []);
+  const map = new Map();
+  [...(Array.isArray(serverList) ? serverList : []), ...(Array.isArray(clientList) ? clientList : [])].forEach(r => {
+    if (r && r.id && r.name && r.comment && !deletedSet.has(r.id)) {
+      const existing = map.get(r.id);
+      if (!existing || r.editedByOwner) {
+        map.set(r.id, r);
+      }
+    }
+  });
+  const merged = Array.from(map.values()).sort((a, b) => {
+    return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+  });
+  return merged.length > 0 ? merged : [...INITIAL_REVIEWS];
 }
 
 export default async function handler(req, res) {
@@ -129,6 +165,7 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-admin-key");
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
 
   if (req.method === "OPTIONS") return res.status(204).end();
 
@@ -139,16 +176,24 @@ export default async function handler(req, res) {
   body = body || {};
 
   try {
-    // 1. GET: Anyone can view all reviews
-    if (req.method === "GET") {
-      const { reviews, storage } = await readReviewsFromCloud();
-      // If owner sends x-admin-key on GET, verify if it's valid
-      const reqAdminKey = (req.headers["x-admin-key"] || "").trim();
+    // 1. GET or SYNC
+    if (req.method === "GET" || (req.method === "POST" && body.action === "sync")) {
+      const { reviews: serverReviews, storage } = await readReviewsFromCloud();
+      let finalReviews = serverReviews;
+
+      if (Array.isArray(body.clientReviews) && body.clientReviews.length > 0) {
+        finalReviews = mergeReviews(serverReviews, body.clientReviews, body.deletedIds);
+        if (finalReviews.length !== serverReviews.length) {
+          await writeReviewsToCloud(finalReviews);
+        }
+      }
+
+      const reqAdminKey = (req.headers["x-admin-key"] || body.adminKey || "").trim();
       const isOwnerVerified = Boolean(reqAdminKey && reqAdminKey === ADMIN_KEY);
-      return res.status(200).json({ ok: true, storage, isOwnerVerified, reviews });
+      return res.status(200).json({ ok: true, storage, isOwnerVerified, reviews: finalReviews });
     }
 
-    // 2. POST: Any visitor can submit a new review
+    // 2. POST: Submit a New Review
     if (req.method === "POST") {
       const name = String(body.name || "").trim().slice(0, 60);
       const city = String(body.city || "India").trim().slice(0, 60);
@@ -160,7 +205,9 @@ export default async function handler(req, res) {
         return res.status(400).json({ ok: false, message: "Name and review comment are required." });
       }
 
-      const { reviews } = await readReviewsFromCloud();
+      const { reviews: serverReviews } = await readReviewsFromCloud();
+      const baseReviews = mergeReviews(serverReviews, body.clientReviews, body.deletedIds);
+
       const newReview = {
         id: "rev-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6),
         name,
@@ -171,12 +218,12 @@ export default async function handler(req, res) {
         createdAt: new Date().toISOString()
       };
 
-      const updated = [newReview, ...reviews];
+      const updated = [newReview, ...baseReviews];
       const storage = await writeReviewsToCloud(updated);
       return res.status(201).json({ ok: true, storage, review: newReview, reviews: updated });
     }
 
-    // 3. Verify Owner Password for PUT (Edit) & DELETE (Remove)
+    // 3. Verify Owner Passkey for PUT & DELETE
     const providedKey = (req.headers["x-admin-key"] || body.adminKey || "").trim();
     if (!providedKey || providedKey !== ADMIN_KEY) {
       return res.status(401).json({
@@ -186,13 +233,14 @@ export default async function handler(req, res) {
       });
     }
 
-    // 4. PUT: Owner edits an existing review
+    // 4. PUT: Owner Edits a Review
     if (req.method === "PUT") {
       const targetId = String(body.id || "").trim();
-      const { reviews } = await readReviewsFromCloud();
+      const { reviews: serverReviews } = await readReviewsFromCloud();
+      const reviews = mergeReviews(serverReviews, body.clientReviews, body.deletedIds);
       const idx = reviews.findIndex(r => r.id === targetId);
       if (idx === -1) {
-        return res.status(404).json({ ok: false, message: "Review not found on server." });
+        return res.status(404).json({ ok: false, message: "Review not found." });
       }
 
       reviews[idx] = {
@@ -209,15 +257,12 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, storage, review: reviews[idx], reviews });
     }
 
-    // 5. DELETE: Owner removes a review
+    // 5. DELETE: Owner Removes a Review
     if (req.method === "DELETE") {
       const targetId = String(body.id || req.query?.id || "").trim();
-      const { reviews } = await readReviewsFromCloud();
-      const filtered = reviews.filter(r => r.id !== targetId);
-
-      if (filtered.length === reviews.length) {
-        return res.status(404).json({ ok: false, message: "Review ID not found." });
-      }
+      const { reviews: serverReviews } = await readReviewsFromCloud();
+      const merged = mergeReviews(serverReviews, body.clientReviews, body.deletedIds);
+      const filtered = merged.filter(r => r.id !== targetId);
 
       const storage = await writeReviewsToCloud(filtered);
       return res.status(200).json({ ok: true, storage, deletedId: targetId, reviews: filtered });
@@ -225,6 +270,6 @@ export default async function handler(req, res) {
 
     return res.status(405).json({ ok: false, message: "Method not allowed" });
   } catch (err) {
-    return res.status(500).json({ ok: false, message: err.message || "Server error in /api/reviews" });
+    return res.status(500).json({ ok: false, message: err.message || "Server error" });
   }
 }
