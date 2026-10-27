@@ -12009,4 +12009,477 @@
     }
   });
 </script>
+  <script id="terra-cloud-reviews-script">
+(() => {
+  const SEED_REVIEWS = [
+    { id: "rev-1", name: "Ka", city: "New Delhi", stars: 5, comment: "It is the BEST", badge: "Community Dispatch", createdAt: "2026-10-27T10:00:00.000Z" },
+    { id: "rev-2", name: "Ka", city: "110018", stars: 5, comment: "Its decent", badge: "Verified Order • MAMTAMODERN40", createdAt: "2026-10-27T09:30:00.000Z" },
+    { id: "rev-3", name: "Kanishk Gulati", city: "New Delhi • 110003", stars: 5, comment: "Good", badge: "Verified Order • KANISHK2405", createdAt: "2026-10-27T09:00:00.000Z" },
+    { id: "rev-4", name: "Kanishk Gulati", city: "New Delhi", stars: 5, comment: "Best website for eco shopping.", badge: "Community Dispatch", createdAt: "2026-10-27T08:30:00.000Z" }
+  ];
+
+  const LOCAL_BACKUP_KEY = "terra_cloud_reviews_backup_v2";
+  const DELETED_IDS_KEY = "terra_deleted_review_ids_v2";
+
+  function loadBackupReviews() {
+    try {
+      const raw = localStorage.getItem(LOCAL_BACKUP_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {}
+    return [...SEED_REVIEWS];
+  }
+
+  function loadDeletedIds() {
+    try {
+      const raw = localStorage.getItem(DELETED_IDS_KEY);
+      if (raw) return JSON.parse(raw) || [];
+    } catch (e) {}
+    return [];
+  }
+
+  function saveBackupReviews(list) {
+    try {
+      localStorage.setItem(LOCAL_BACKUP_KEY, JSON.stringify(list));
+    } catch (e) {}
+  }
+
+  function addDeletedId(id) {
+    try {
+      const list = loadDeletedIds();
+      if (!list.includes(id)) {
+        list.push(id);
+        localStorage.setItem(DELETED_IDS_KEY, JSON.stringify(list));
+      }
+    } catch (e) {}
+  }
+
+  let globalReviews = loadBackupReviews();
+  let ownerPasskey = sessionStorage.getItem("terra_owner_key") || "";
+  let isOwnerMode = false;
+  let editingReviewId = null;
+  let selectedPageStars = 5;
+  let selectedCheckoutStars = 5;
+  let activeStorageMode = "cloud-db";
+
+  function escapeHtml(str) {
+    return String(str || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function formatRelativeTime(isoString) {
+    if (!isoString) return "Recently";
+    const diffSec = Math.floor((Date.now() - new Date(isoString).getTime()) / 1000);
+    if (isNaN(diffSec) || diffSec < 60) return "Just now";
+    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+    return `${Math.floor(diffSec / 86400)}d ago`;
+  }
+
+  function ensureOwnerToolbar() {
+    const wall = document.getElementById("terra-reviews-wall");
+    if (!wall || document.getElementById("terra-owner-toolbar")) return;
+    const bar = document.createElement("div");
+    bar.id = "terra-owner-toolbar";
+    bar.className = "terra-owner-bar";
+    wall.parentNode.insertBefore(bar, wall);
+    renderOwnerToolbar();
+  }
+
+  function renderOwnerToolbar() {
+    const bar = document.getElementById("terra-owner-toolbar");
+    if (!bar) return;
+    bar.className = `terra-owner-bar ${isOwnerMode ? "unlocked" : ""}`;
+
+    const dbLabel =
+      activeStorageMode === "vercel-kv" ? "🟢 Cloud DB (Vercel KV)" :
+      activeStorageMode === "cloud-db" ? "🟢 Cloud Database Active (Permanent Sync)" :
+      "🟢 Cloud + Local Sync Active";
+
+    if (isOwnerMode) {
+      bar.innerHTML = `
+        <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+          <span class="terra-db-badge">${dbLabel}</span>
+          <strong style="color:var(--accent-forest);">👑 Creator / Owner Mode Unlocked</strong>
+          <span style="color:var(--text-secondary);">You can edit or remove any review below.</span>
+        </div>
+        <div style="display:flex;gap:0.4rem;">
+          <button type="button" class="btn btn-sm btn-secondary" id="terra-sync-reviews-btn">↻ Sync Now</button>
+          <button type="button" class="btn btn-sm btn-ghost" id="terra-lock-owner-btn">Lock Owner Mode</button>
+        </div>
+      `;
+      bar.querySelector("#terra-sync-reviews-btn")?.addEventListener("click", () => fetchServerReviews());
+      bar.querySelector("#terra-lock-owner-btn")?.addEventListener("click", () => {
+        isOwnerMode = false;
+        ownerPasskey = "";
+        editingReviewId = null;
+        sessionStorage.removeItem("terra_owner_key");
+        renderOwnerToolbar();
+        renderReviewsAndStats();
+      });
+    } else {
+      bar.innerHTML = `
+        <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+          <span class="terra-db-badge">${dbLabel}</span>
+          <span style="color:var(--text-secondary);">All reviews permanently saved &amp; synced</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">
+          <input type="password" id="terra-owner-pass-input" placeholder="Creator passkey..." style="padding:0.28rem 0.6rem;border-radius:var(--radius-pill);border:1px solid var(--border-strong);background:var(--bg-elevated);font-size:0.75rem;width:140px;" />
+          <button type="button" class="btn btn-sm btn-secondary" id="terra-unlock-owner-btn">🔒 Owner Login</button>
+          <button type="button" class="btn btn-sm btn-ghost" id="terra-sync-reviews-btn" title="Sync Reviews">↻</button>
+        </div>
+      `;
+      bar.querySelector("#terra-sync-reviews-btn")?.addEventListener("click", () => fetchServerReviews());
+      bar.querySelector("#terra-unlock-owner-btn")?.addEventListener("click", async () => {
+        const input = bar.querySelector("#terra-owner-pass-input");
+        const key = (input?.value || "").trim();
+        if (!key) return;
+        ownerPasskey = key;
+        await fetchServerReviews(true);
+      });
+      bar.querySelector("#terra-owner-pass-input")?.addEventListener("keydown", async (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          bar.querySelector("#terra-unlock-owner-btn")?.click();
+        }
+      });
+    }
+  }
+
+  // Bidirectional Cloud Sync — Sends known reviews & deleted IDs so refresh NEVER loses data
+  async function fetchServerReviews(verifyOwnerAttempt = false) {
+    ensureOwnerToolbar();
+    try {
+      const headers = { "Content-Type": "application/json" };
+      if (ownerPasskey) headers["x-admin-key"] = ownerPasskey;
+
+      const res = await fetch("/api/reviews", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          action: "sync",
+          adminKey: ownerPasskey,
+          clientReviews: globalReviews,
+          deletedIds: loadDeletedIds()
+        })
+      });
+      const data = await res.json();
+
+      if (res.ok && data.ok && Array.isArray(data.reviews) && data.reviews.length > 0) {
+        const deletedSet = new Set(loadDeletedIds());
+        globalReviews = data.reviews.filter(r => !deletedSet.has(r.id));
+        saveBackupReviews(globalReviews);
+        activeStorageMode = data.storage || "cloud-db";
+
+        if (ownerPasskey) {
+          if (data.isOwnerVerified) {
+            isOwnerMode = true;
+            sessionStorage.setItem("terra_owner_key", ownerPasskey);
+            if (verifyOwnerAttempt && typeof notify === "function") {
+              notify({ title: "👑 Owner Mode Unlocked", message: "You can now edit or remove any review.", type: "points" });
+            }
+          } else if (verifyOwnerAttempt) {
+            isOwnerMode = false;
+            ownerPasskey = "";
+            sessionStorage.removeItem("terra_owner_key");
+            if (typeof notify === "function") {
+              notify({ title: "Invalid Passkey", message: "Incorrect Creator Passkey.", type: "filter" });
+            }
+          }
+        }
+      }
+    } catch (err) {
+      // Keep local backup intact if offline
+      globalReviews = loadBackupReviews();
+    }
+    renderOwnerToolbar();
+    renderReviewsAndStats();
+  }
+
+  function renderReviewsAndStats() {
+    const totalEl = document.getElementById("terra-total-feedback-count");
+    const avgEl = document.getElementById("terra-avg-star-score");
+    const pctEl = document.getElementById("terra-satisfaction-pct");
+    const barsEl = document.getElementById("terra-rating-bars");
+    const wallEl = document.getElementById("terra-reviews-wall");
+
+    if (!Array.isArray(globalReviews) || globalReviews.length === 0) {
+      globalReviews = loadBackupReviews();
+    }
+
+    const total = globalReviews.length;
+    const sumStars = globalReviews.reduce((acc, r) => acc + (Number(r.stars) || 5), 0);
+    const avg = total > 0 ? (sumStars / total).toFixed(1) : "5.0";
+    const highCount = globalReviews.filter(r => (Number(r.stars) || 5) >= 4).length;
+    const highPct = total > 0 ? Math.round((highCount / total) * 100) : 100;
+
+    if (totalEl) totalEl.textContent = String(total);
+    if (avgEl) avgEl.textContent = avg;
+    if (pctEl) pctEl.textContent = `${highPct}% of verified reviewers rated TERRA 4 or 5 stars`;
+
+    if (barsEl) {
+      barsEl.innerHTML = [5, 4, 3, 2, 1].map(star => {
+        const count = globalReviews.filter(r => Math.round(Number(r.stars) || 5) === star).length;
+        const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+        return `
+          <div class="terra-bar-row">
+            <span style="width:38px;">${star} ★</span>
+            <div class="terra-bar-track"><div class="terra-bar-fill" style="width:${pct}%"></div></div>
+            <span style="width:32px;text-align:right;font-family:var(--font-mono);color:var(--text-muted);">${count}</span>
+          </div>
+        `;
+      }).join("");
+    }
+
+    if (!wallEl) return;
+
+    wallEl.innerHTML = globalReviews.map(r => {
+      const starsCount = Math.min(5, Math.max(1, Math.round(Number(r.stars) || 5)));
+      const starsStr = "★".repeat(starsCount) + "☆".repeat(5 - starsCount);
+      const isEditing = isOwnerMode && editingReviewId === r.id;
+
+      return `
+        <article class="terra-review-card" data-review-id="${escapeHtml(r.id)}">
+          <div class="terra-review-top">
+            <div>
+              <strong style="font-size:0.95rem;">${escapeHtml(r.name)}</strong>
+              <span style="font-size:0.76rem;color:var(--text-muted);margin-left:0.4rem;">• ${escapeHtml(r.city)}</span>
+            </div>
+            <div class="terra-review-stars" style="color:#F59E0B;">${starsStr}</div>
+          </div>
+          <p style="font-size:0.88rem;color:var(--text-secondary);line-height:1.55;margin-bottom:0.65rem;">"${escapeHtml(r.comment)}"</p>
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:0.72rem;color:var(--text-muted);">
+            <span class="card-mini-tag">${escapeHtml(r.badge || "Community Dispatch")}${r.editedByOwner ? " • Edited" : ""}</span>
+            <span>${formatRelativeTime(r.createdAt)}</span>
+          </div>
+
+          ${isOwnerMode && !isEditing ? `
+            <div class="terra-owner-actions">
+              <button type="button" class="terra-owner-btn" data-owner-edit="${escapeHtml(r.id)}">✏️ Edit Review</button>
+              <button type="button" class="terra-owner-btn danger" data-owner-delete="${escapeHtml(r.id)}">🗑️ Remove</button>
+            </div>
+          ` : ""}
+
+          ${isEditing ? `
+            <div class="terra-edit-form-box">
+              <div style="font-size:0.76rem;font-weight:800;color:var(--accent-forest);">👑 Editing Review (${escapeHtml(r.id)})</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.45rem;">
+                <input type="text" id="edit-rev-name-${escapeHtml(r.id)}" value="${escapeHtml(r.name)}" placeholder="Reviewer Name" />
+                <input type="text" id="edit-rev-city-${escapeHtml(r.id)}" value="${escapeHtml(r.city)}" placeholder="City / PIN" />
+              </div>
+              <div style="display:grid;grid-template-columns:120px 1fr;gap:0.45rem;">
+                <select id="edit-rev-stars-${escapeHtml(r.id)}">
+                  ${[5, 4, 3, 2, 1].map(s => `<option value="${s}" ${s === starsCount ? "selected" : ""}>${s} Stars</option>`).join("")}
+                </select>
+                <input type="text" id="edit-rev-badge-${escapeHtml(r.id)}" value="${escapeHtml(r.badge || "Community Dispatch")}" placeholder="Badge label" />
+              </div>
+              <textarea id="edit-rev-comment-${escapeHtml(r.id)}" rows="2">${escapeHtml(r.comment)}</textarea>
+              <div style="display:flex;justify-content:flex-end;gap:0.4rem;">
+                <button type="button" class="btn btn-sm btn-ghost" data-owner-cancel-edit="${escapeHtml(r.id)}">Cancel</button>
+                <button type="button" class="btn btn-sm btn-primary" data-owner-save-edit="${escapeHtml(r.id)}">💾 Save to Cloud</button>
+              </div>
+            </div>
+          ` : ""}
+        </article>
+      `;
+    }).join("");
+
+    wallEl.querySelectorAll("[data-owner-edit]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        editingReviewId = btn.dataset.ownerEdit;
+        renderReviewsAndStats();
+      });
+    });
+
+    wallEl.querySelectorAll("[data-owner-cancel-edit]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        editingReviewId = null;
+        renderReviewsAndStats();
+      });
+    });
+
+    wallEl.querySelectorAll("[data-owner-save-edit]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.ownerSaveEdit;
+        const name = document.getElementById(`edit-rev-name-${id}`)?.value.trim();
+        const city = document.getElementById(`edit-rev-city-${id}`)?.value.trim();
+        const stars = Number(document.getElementById(`edit-rev-stars-${id}`)?.value || 5);
+        const badge = document.getElementById(`edit-rev-badge-${id}`)?.value.trim();
+        const comment = document.getElementById(`edit-rev-comment-${id}`)?.value.trim();
+
+        btn.disabled = true;
+        btn.textContent = "Saving...";
+
+        const res = await fetch("/api/reviews", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", "x-admin-key": ownerPasskey },
+          body: JSON.stringify({ id, name, city, stars, badge, comment, clientReviews: globalReviews, deletedIds: loadDeletedIds() })
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          globalReviews = data.reviews;
+          saveBackupReviews(globalReviews);
+          editingReviewId = null;
+          if (typeof TerraSound !== "undefined") TerraSound.playChime();
+          if (typeof notify === "function") notify({ title: "Review Updated", message: "Saved changes to cloud database.", type: "points" });
+          renderReviewsAndStats();
+        } else {
+          btn.disabled = false;
+          btn.textContent = "💾 Save to Cloud";
+          if (typeof notify === "function") notify({ title: "Update Failed", message: data.message || "Error updating review.", type: "filter" });
+        }
+      });
+    });
+
+    wallEl.querySelectorAll("[data-owner-delete]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.ownerDelete;
+        btn.disabled = true;
+        btn.textContent = "Removing...";
+
+        addDeletedId(id);
+        globalReviews = globalReviews.filter(r => r.id !== id);
+        saveBackupReviews(globalReviews);
+
+        const res = await fetch("/api/reviews", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json", "x-admin-key": ownerPasskey },
+          body: JSON.stringify({ id, clientReviews: globalReviews, deletedIds: loadDeletedIds() })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok && Array.isArray(data.reviews)) {
+          globalReviews = data.reviews;
+          saveBackupReviews(globalReviews);
+        }
+        if (typeof TerraSound !== "undefined") TerraSound.playTap(420);
+        if (typeof notify === "function") notify({ title: "Review Removed", message: "Permanently deleted.", type: "default" });
+        renderReviewsAndStats();
+      });
+    });
+  }
+
+  async function postReviewToServer({ name, city, stars, comment, badge }) {
+    // Immediately add to local state & backup so it NEVER disappears
+    const optimisticReview = {
+      id: "rev-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6),
+      name,
+      city,
+      stars,
+      comment,
+      badge,
+      createdAt: new Date().toISOString()
+    };
+    globalReviews = [optimisticReview, ...globalReviews];
+    saveBackupReviews(globalReviews);
+    renderReviewsAndStats();
+
+    try {
+      const res = await fetch("/api/reviews", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          city,
+          stars,
+          comment,
+          badge,
+          clientReviews: globalReviews,
+          deletedIds: loadDeletedIds()
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.ok && Array.isArray(data.reviews)) {
+        const deletedSet = new Set(loadDeletedIds());
+        globalReviews = data.reviews.filter(r => !deletedSet.has(r.id));
+        saveBackupReviews(globalReviews);
+        activeStorageMode = data.storage || "cloud-db";
+        renderOwnerToolbar();
+        renderReviewsAndStats();
+      }
+    } catch (e) {}
+    return true;
+  }
+
+  window.addEventListener("DOMContentLoaded", () => {
+    // Render immediately from backup, then sync with cloud
+    ensureOwnerToolbar();
+    renderReviewsAndStats();
+    fetchServerReviews();
+
+    // Clone standalone form to remove any conflicting old Part 2 listeners
+    const oldForm = document.getElementById("terra-standalone-feedback-form");
+    if (oldForm) {
+      const cleanForm = oldForm.cloneNode(true);
+      oldForm.parentNode.replaceChild(cleanForm, oldForm);
+
+      const pageStarBtns = cleanForm.querySelectorAll("#fb-page-star-picker [data-fb-star]");
+      pageStarBtns.forEach(btn => {
+        btn.addEventListener("click", () => {
+          selectedPageStars = Number(btn.dataset.fbStar) || 5;
+          pageStarBtns.forEach(b => b.classList.toggle("active", Number(b.dataset.fbStar) <= selectedPageStars));
+        });
+      });
+
+      cleanForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const name = document.getElementById("fb-page-name")?.value.trim();
+        const city = document.getElementById("fb-page-city")?.value.trim();
+        const comment = document.getElementById("fb-page-comment")?.value.trim();
+        if (!name || !comment) return;
+
+        const submitBtn = cleanForm.querySelector('button[type="submit"]');
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "Saving to Cloud..."; }
+
+        await postReviewToServer({
+          name,
+          city,
+          stars: selectedPageStars,
+          comment,
+          badge: "Community Dispatch"
+        });
+
+        if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Post Verified Feedback (+15 Pts)"; }
+        cleanForm.reset();
+        if (typeof addPoints === "function") addPoints(15, "Posted Global Storefront Review");
+        if (typeof ConfettiEngine !== "undefined") ConfettiEngine.burst(window.innerWidth / 2, window.innerHeight / 2, 35);
+      });
+    }
+
+    // Checkout form hook
+    const coStarBtns = document.querySelectorAll("#checkout-star-picker [data-star-val]");
+    const coReadout = document.getElementById("checkout-star-readout");
+    const starLabels = { 1: "1/5 • Needs Work", 2: "2/5 • Fair", 3: "3/5 • Good", 4: "4/5 • Great!", 5: "5/5 • Exceptional!" };
+    coStarBtns.forEach(btn => {
+      btn.addEventListener("click", () => {
+        selectedCheckoutStars = Number(btn.dataset.starVal) || 5;
+        coStarBtns.forEach(b => b.classList.toggle("active", Number(b.dataset.starVal) <= selectedCheckoutStars));
+        if (coReadout) coReadout.textContent = starLabels[selectedCheckoutStars];
+      });
+    });
+
+    const checkoutForm = document.getElementById("checkout-form");
+    checkoutForm?.addEventListener("submit", () => {
+      const name = document.getElementById("checkout-name")?.value.trim() || "Verified Buyer";
+      const city = document.getElementById("checkout-city")?.value.trim() || "India";
+      const comment = document.getElementById("checkout-feedback-input")?.value.trim();
+      const activeCoupon = document.querySelector(".terra-coupon-chip.active")?.dataset?.couponCode;
+      if (comment) {
+        postReviewToServer({
+          name,
+          city,
+          stars: selectedCheckoutStars,
+          comment,
+          badge: activeCoupon ? `Verified Order • ${activeCoupon}` : "Verified Order"
+        });
+      }
+    });
+  });
+})();
+</script>
 </body></html>
