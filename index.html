@@ -11744,4 +11744,269 @@
   });
 })();
 </script>
+  <!-- ===================== UPGRADED ZIP EXPORTER (INCLUDES api/reviews.js) ===================== -->
+<script id="terra-zip-exporter-upgrade">
+  window.compileAndDownloadZip = async function () {
+    if (typeof JSZip === "undefined") return;
+    if (typeof TerraSound !== "undefined") TerraSound.playDopamineFanfare();
+    if (typeof ConfettiEngine !== "undefined") ConfettiEngine.burst(window.innerWidth / 2, 60, 40);
+
+    const zip = new JSZip();
+
+    // 1. Pack current index.html
+    const clonedDoc = document.documentElement.cloneNode(true);
+    clonedDoc.querySelectorAll('[data-bard-client-injected], [ws-interception-config]').forEach(el => el.remove());
+    zip.file("index.html", "<!DOCTYPE html>\n" + clonedDoc.outerHTML);
+
+    // 2. Pack api/chat.js
+    const chatServerlessSource = [
+      'const MODEL_CASCADE = [',
+      '  "gemini-3.5-flash-lite",',
+      '  "gemini-3.5-flash",',
+      '  "gemini-3-flash-preview"',
+      '];',
+      'const LEGACY_MODEL_ALIASES = new Set([',
+      '  "gemini-2.5-flash-lite",',
+      '  "gemini-2.5-flash",',
+      '  "gemini-2.0-flash",',
+      '  "gemini-2.0-flash-lite"',
+      ']);',
+      'const DEFAULT_MODEL = "gemini-3.5-flash-lite";',
+      '',
+      'export default async function handler(req, res) {',
+      '  res.setHeader("Content-Type", "application/json; charset=utf-8");',
+      '  res.setHeader("Access-Control-Allow-Origin", "*");',
+      '  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");',
+      '  res.setHeader("Access-Control-Allow-Headers", "Content-Type");',
+      '',
+      '  if (req.method === "OPTIONS") return res.status(204).end();',
+      '  if (req.method !== "POST") {',
+      '    return res.status(405).json({ ok: false, errorCode: "METHOD_NOT_ALLOWED", message: "Use POST /api/chat" });',
+      '  }',
+      '',
+      '  const apiKey = (',
+      '    process.env.GEMINI_API_KEY ||',
+      '    process.env.GeminiAPIKey ||',
+      '    process.env.GOOGLE_API_KEY ||',
+      '    ""',
+      '  ).trim();',
+      '',
+      '  if (!apiKey) {',
+      '    return res.status(503).json({',
+      '      ok: false,',
+      '      errorCode: "MISSING_API_KEY",',
+      '      message: "GEMINI_API_KEY is not set in Vercel Environment Variables."',
+      '    });',
+      '  }',
+      '',
+      '  let body = req.body;',
+      '  if (typeof body === "string") {',
+      '    try { body = JSON.parse(body || "{}"); } catch { body = {}; }',
+      '  }',
+      '  body = body || {};',
+      '',
+      '  const rawRequested = typeof body.model === "string" ? body.model.trim() : "";',
+      '  const primaryModel = !rawRequested || LEGACY_MODEL_ALIASES.has(rawRequested) ? DEFAULT_MODEL : rawRequested;',
+      '  const modelsToTry = [primaryModel, ...MODEL_CASCADE.filter(m => m !== primaryModel)];',
+      '',
+      '  let lastStatus = 502;',
+      '  let lastMsg = "";',
+      '  for (const candidateModel of modelsToTry) {',
+      '    const endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(candidateModel) + ":generateContent";',
+      '    try {',
+      '      const r = await fetch(endpoint, {',
+      '        method: "POST",',
+      '        headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },',
+      '        body: JSON.stringify({',
+      '          contents: body.contents,',
+      '          ...(body.systemInstruction ? { systemInstruction: body.systemInstruction } : {}),',
+      '          ...(body.generationConfig ? { generationConfig: body.generationConfig } : {})',
+      '        })',
+      '      });',
+      '      const data = await r.json().catch(() => ({}));',
+      '      if (r.ok) {',
+      '        const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("").trim() || "";',
+      '        return res.status(200).json({ ok: true, source: "gemini", model: candidateModel, text, candidates: data.candidates });',
+      '      }',
+      '      lastStatus = r.status;',
+      '      lastMsg = data?.error?.message || ("Gemini HTTP " + r.status);',
+      '      if (r.status === 404 || /no longer available|not found|not supported/i.test(lastMsg)) continue;',
+      '      break;',
+      '    } catch (err) {',
+      '      return res.status(502).json({ ok: false, errorCode: "NETWORK_ERROR", message: "Failed to reach Gemini API." });',
+      '    }',
+      '  }',
+      '  return res.status(lastStatus).json({',
+      '    ok: false,',
+      '    errorCode: lastStatus === 429 ? "QUOTA_EXCEEDED" : "UPSTREAM_" + lastStatus,',
+      '    message: lastMsg || ("Gemini HTTP " + lastStatus)',
+      '  });',
+      '}'
+    ].join("\n");
+
+    // 3. Pack api/reviews.js (Global Reviews & Owner Moderation API)
+    const reviewsServerlessSource = [
+      'const INITIAL_REVIEWS = [',
+      '  { id: "rev-1", name: "Ka", city: "New Delhi", stars: 5, comment: "It is the BEST", badge: "Community Dispatch", createdAt: "2026-10-27T10:00:00.000Z" },',
+      '  { id: "rev-2", name: "Ka", city: "110018", stars: 5, comment: "Its decent", badge: "Verified Order • MAMTAMODERN40", createdAt: "2026-10-27T09:30:00.000Z" },',
+      '  { id: "rev-3", name: "Kanishk Gulati", city: "New Delhi • 110003", stars: 5, comment: "Good", badge: "Verified Order • KANISHK2405", createdAt: "2026-10-27T09:00:00.000Z" },',
+      '  { id: "rev-4", name: "Kanishk Gulati", city: "New Delhi", stars: 5, comment: "Best website for eco shopping.", badge: "Community Dispatch", createdAt: "2026-10-27T08:30:00.000Z" }',
+      '];',
+      'let memoryStore = [...INITIAL_REVIEWS];',
+      'const REDIS_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "").trim();',
+      'const REDIS_TOKEN = (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();',
+      'const GIST_ID = (process.env.GITHUB_GIST_ID || "").trim();',
+      'const GITHUB_TOKEN = (process.env.GITHUB_TOKEN || "").trim();',
+      'const ADMIN_KEY = (process.env.TERRA_ADMIN_KEY || "kanishk2405").trim();',
+      'const STORAGE_KEY = "terra_global_reviews_v1";',
+      '',
+      'async function readReviewsFromCloud() {',
+      '  if (REDIS_URL && REDIS_TOKEN) {',
+      '    const res = await fetch(REDIS_URL + "/get/" + STORAGE_KEY, { headers: { Authorization: "Bearer " + REDIS_TOKEN } });',
+      '    const data = await res.json().catch(() => ({}));',
+      '    if (data && data.result) {',
+      '      const parsed = typeof data.result === "string" ? JSON.parse(data.result) : data.result;',
+      '      if (Array.isArray(parsed)) return { reviews: parsed, storage: "vercel-kv" };',
+      '    }',
+      '    await writeReviewsToCloud(INITIAL_REVIEWS);',
+      '    return { reviews: INITIAL_REVIEWS, storage: "vercel-kv" };',
+      '  }',
+      '  if (GIST_ID && GITHUB_TOKEN) {',
+      '    const res = await fetch("https://api.github.com/gists/" + GIST_ID, {',
+      '      headers: { Authorization: "Bearer " + GITHUB_TOKEN, Accept: "application/vnd.github+json" }',
+      '    });',
+      '    if (res.ok) {',
+      '      const gist = await res.json();',
+      '      const content = gist.files?.["terra-reviews.json"]?.content;',
+      '      if (content) return { reviews: JSON.parse(content), storage: "github-gist" };',
+      '    }',
+      '  }',
+      '  return { reviews: memoryStore, storage: "server-memory" };',
+      '}',
+      '',
+      'async function writeReviewsToCloud(reviewsArray) {',
+      '  memoryStore = reviewsArray;',
+      '  if (REDIS_URL && REDIS_TOKEN) {',
+      '    await fetch(REDIS_URL + "/set/" + STORAGE_KEY, {',
+      '      method: "POST",',
+      '      headers: { Authorization: "Bearer " + REDIS_TOKEN, "Content-Type": "application/json" },',
+      '      body: JSON.stringify(JSON.stringify(reviewsArray))',
+      '    });',
+      '    return "vercel-kv";',
+      '  }',
+      '  if (GIST_ID && GITHUB_TOKEN) {',
+      '    await fetch("https://api.github.com/gists/" + GIST_ID, {',
+      '      method: "PATCH",',
+      '      headers: { Authorization: "Bearer " + GITHUB_TOKEN, Accept: "application/vnd.github+json", "Content-Type": "application/json" },',
+      '      body: JSON.stringify({ files: { "terra-reviews.json": { content: JSON.stringify(reviewsArray, null, 2) } } })',
+      '    });',
+      '    return "github-gist";',
+      '  }',
+      '  return "server-memory";',
+      '}',
+      '',
+      'export default async function handler(req, res) {',
+      '  res.setHeader("Content-Type", "application/json; charset=utf-8");',
+      '  res.setHeader("Access-Control-Allow-Origin", "*");',
+      '  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");',
+      '  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-admin-key");',
+      '  if (req.method === "OPTIONS") return res.status(204).end();',
+      '  let body = req.body;',
+      '  if (typeof body === "string") { try { body = JSON.parse(body || "{}"); } catch { body = {}; } }',
+      '  body = body || {};',
+      '  try {',
+      '    if (req.method === "GET") {',
+      '      const { reviews, storage } = await readReviewsFromCloud();',
+      '      const reqAdminKey = (req.headers["x-admin-key"] || "").trim();',
+      '      const isOwnerVerified = Boolean(reqAdminKey && reqAdminKey === ADMIN_KEY);',
+      '      return res.status(200).json({ ok: true, storage, isOwnerVerified, reviews });',
+      '    }',
+      '    if (req.method === "POST") {',
+      '      const name = String(body.name || "").trim().slice(0, 60);',
+      '      const city = String(body.city || "India").trim().slice(0, 60);',
+      '      const comment = String(body.comment || "").trim().slice(0, 500);',
+      '      const stars = Math.min(5, Math.max(1, Number(body.stars) || 5));',
+      '      const badge = String(body.badge || "Community Dispatch").trim().slice(0, 60);',
+      '      if (!name || !comment) return res.status(400).json({ ok: false, message: "Name and comment required." });',
+      '      const { reviews } = await readReviewsFromCloud();',
+      '      const newReview = { id: "rev-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6), name, city, stars, comment, badge, createdAt: new Date().toISOString() };',
+      '      const updated = [newReview, ...reviews];',
+      '      const storage = await writeReviewsToCloud(updated);',
+      '      return res.status(201).json({ ok: true, storage, review: newReview, reviews: updated });',
+      '    }',
+      '    const providedKey = (req.headers["x-admin-key"] || body.adminKey || "").trim();',
+      '    if (!providedKey || providedKey !== ADMIN_KEY) {',
+      '      return res.status(401).json({ ok: false, errorCode: "UNAUTHORIZED_OWNER", message: "Invalid Owner Passkey." });',
+      '    }',
+      '    if (req.method === "PUT") {',
+      '      const targetId = String(body.id || "").trim();',
+      '      const { reviews } = await readReviewsFromCloud();',
+      '      const idx = reviews.findIndex(r => r.id === targetId);',
+      '      if (idx === -1) return res.status(404).json({ ok: false, message: "Review not found." });',
+      '      reviews[idx] = {',
+      '        ...reviews[idx],',
+      '        name: body.name !== undefined ? String(body.name).trim().slice(0, 60) : reviews[idx].name,',
+      '        city: body.city !== undefined ? String(body.city).trim().slice(0, 60) : reviews[idx].city,',
+      '        stars: body.stars !== undefined ? Math.min(5, Math.max(1, Number(body.stars))) : reviews[idx].stars,',
+      '        comment: body.comment !== undefined ? String(body.comment).trim().slice(0, 500) : reviews[idx].comment,',
+      '        badge: body.badge !== undefined ? String(body.badge).trim().slice(0, 60) : reviews[idx].badge,',
+      '        editedByOwner: true',
+      '      };',
+      '      const storage = await writeReviewsToCloud(reviews);',
+      '      return res.status(200).json({ ok: true, storage, review: reviews[idx], reviews });',
+      '    }',
+      '    if (req.method === "DELETE") {',
+      '      const targetId = String(body.id || req.query?.id || "").trim();',
+      '      const { reviews } = await readReviewsFromCloud();',
+      '      const filtered = reviews.filter(r => r.id !== targetId);',
+      '      const storage = await writeReviewsToCloud(filtered);',
+      '      return res.status(200).json({ ok: true, storage, deletedId: targetId, reviews: filtered });',
+      '    }',
+      '    return res.status(405).json({ ok: false, message: "Method not allowed" });',
+      '  } catch (err) {',
+      '    return res.status(500).json({ ok: false, message: err.message || "Server error" });',
+      '  }',
+      '}'
+    ].join("\n");
+
+    zip.file("api/chat.js", chatServerlessSource);
+    zip.file("api/reviews.js", reviewsServerlessSource);
+    zip.file("package.json", JSON.stringify({
+      name: "terra-purposeful-storefront",
+      version: "1.0.0",
+      private: true,
+      type: "module",
+      engines: { node: ">=18.x" }
+    }, null, 2));
+    zip.file("vercel.json", JSON.stringify({
+      version: 2,
+      cleanUrls: true,
+      trailingSlash: false
+    }, null, 2));
+
+    const blob = await zip.generateAsync({ type: "blob" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "terra-storefront-vercel-ready.zip";
+    a.click();
+
+    if (typeof notify === "function") {
+      notify({
+        title: "ZIP Compiled",
+        message: "Downloaded ZIP with index.html, api/chat.js, api/reviews.js, package.json & vercel.json!",
+        type: "points"
+      });
+    }
+  };
+
+  // Re-bind the Export (.ZIP) button to the upgraded function
+  window.addEventListener("DOMContentLoaded", () => {
+    const btn = document.getElementById("download-project-zip-btn");
+    if (btn) {
+      const freshBtn = btn.cloneNode(true);
+      btn.parentNode.replaceChild(freshBtn, btn);
+      freshBtn.addEventListener("click", window.compileAndDownloadZip);
+    }
+  });
+</script>
 </body></html>
