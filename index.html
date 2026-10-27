@@ -13278,4 +13278,148 @@
     }
   });
 </script>
+  <!-- ===================== VIBRANT CASINO-STYLE REWARD WHEEL UPGRADE (SPACING & SLICES FIXED) ===================== -->
+<style id="terra-vibrant-wheel-styles">
+  .spin-section-grid {
+    display: grid;
+    grid-template-columns: 210px 1fr;
+    gap: 1.5rem;
+    align-items: center;
+  }
+  .wheel-frame {
+    position: relative;
+    width: 200px;
+    height: 200px;
+    margin: 0 auto;
+    filter: drop-shadow(0 8px 20px rgba(0, 0, 0, 0.45));
+  }
+  .wheel-pointer {
+    position: absolute;
+    top: -16px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    color: #FBBF24;
+    font-size: 1.5rem;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+    animation: pointerBounce 0.6s infinite alternate ease-in-out;
+  }
+  @keyframes pointerBounce {
+    from { transform: translateX(-50%) translateY(0); }
+    to { transform: translateX(-50%) translateY(-4px); }
+  }
+  .purpose-wheel {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    border: 6px solid #10B981;
+    background: conic-gradient(
+      #10B981 0deg 60deg,
+      #3B82F6 60deg 120deg,
+      #F59E0B 120deg 180deg,
+      #EC4899 180deg 240deg,
+      #8B5CF6 240deg 300deg,
+      #14B8A6 300deg 360deg
+    );
+    box-shadow: inset 0 0 16px rgba(0,0,0,0.35), 0 0 20px rgba(16, 185, 129, 0.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform 3.2s cubic-bezier(0.15, 0.95, 0.15, 1);
+  }
+  .wheel-slice-label {
+    position: absolute;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 800;
+    color: #FFFFFF;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.85);
+    pointer-events: none;
+    width: 55px;
+    text-align: center;
+  }
+  .wheel-center-cap {
+    width: 54px;
+    height: 54px;
+    border-radius: 50%;
+    background: var(--bg-elevated);
+    border: 3px solid #10B981;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.62rem;
+    font-weight: 900;
+    color: var(--accent-forest);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    z-index: 10;
+  }
+  @media (max-width: 920px) {
+    .spin-section-grid {
+      grid-template-columns: 1fr;
+      text-align: center;
+    }
+  }
+</style>
+
+<script id="terra-vibrant-wheel-script">
+  window.addEventListener("DOMContentLoaded", () => {
+    const wheelFrame = document.querySelector(".wheel-frame");
+    if (!wheelFrame) return;
+
+    // Perfectly positioned & rotated text labels for each of the 6 colored segments
+    wheelFrame.innerHTML = `
+      <div class="wheel-pointer">▼</div>
+      <div class="purpose-wheel" id="purpose-wheel">
+        <span class="wheel-slice-label" style="top:32px; right:32px; transform: rotate(30deg);">+50 Pts</span>
+        <span class="wheel-slice-label" style="top:88px; right:12px; transform: rotate(90deg);">+75 Pts</span>
+        <span class="wheel-slice-label" style="bottom:32px; right:32px; transform: rotate(150deg);">+25 Pts</span>
+        <span class="wheel-slice-label" style="bottom:32px; left:32px; transform: rotate(210deg);">+100 Pts</span>
+        <span class="wheel-slice-label" style="top:88px; left:12px; transform: rotate(270deg);">+10 Pts</span>
+        <span class="wheel-slice-label" style="top:32px; left:32px; transform: rotate(330deg);">+20 Pts</span>
+        <div class="wheel-center-cap">TERRA</div>
+      </div>
+    `;
+
+    const spinBtn = document.getElementById("spin-trigger-btn");
+    const resultBox = document.getElementById("spin-result-box");
+    const wheel = document.getElementById("purpose-wheel");
+
+    if (spinBtn && wheel) {
+      const newSpinBtn = spinBtn.cloneNode(true);
+      spinBtn.parentNode.replaceChild(newSpinBtn, spinBtn);
+
+      newSpinBtn.addEventListener("click", (e) => {
+        if (typeof state !== "undefined" && state.hasSpunToday) {
+          if (typeof notify === "function") notify({ title: "Already Spun", message: "Come back tomorrow for your next spin.", type: "filter" });
+          return;
+        }
+        if (typeof state !== "undefined") state.hasSpunToday = true;
+        if (typeof TerraSound !== "undefined") TerraSound.playSpinSequence();
+
+        const randomPoints = [20, 50, 75, 100, 25, 10][Math.floor(Math.random() * 6)];
+        const extraDegrees = [30, 90, 150, 210, 270, 330][Math.floor(Math.random() * 6)];
+        const totalDeg = 1800 + extraDegrees;
+
+        wheel.style.transform = `rotate(${totalDeg}deg)`;
+        newSpinBtn.disabled = true;
+        newSpinBtn.style.opacity = "0.6";
+
+        setTimeout(() => {
+          if (typeof ConfettiEngine !== "undefined") {
+            ConfettiEngine.burst(e.clientX || window.innerWidth / 2, e.clientY || window.innerHeight / 2, 55);
+          }
+          if (typeof addPoints === "function") {
+            addPoints(randomPoints, "Daily Purpose Wheel Spin");
+          }
+          if (resultBox) {
+            resultBox.textContent = `🎉 Incredible! You won +${randomPoints} Purpose Points!`;
+            resultBox.classList.remove("hidden");
+          }
+          newSpinBtn.textContent = "✓ Spun for Today";
+        }, 3300);
+      });
+    }
+  });
+</script>
 </body></html>
