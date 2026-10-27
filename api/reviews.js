@@ -1,65 +1,21 @@
-// api/reviews.js — True Shared Cloud Database (Supports Deleting ALL Reviews + Cross-Device Sync)
+// api/reviews.js — Clean Cloud Database (Zero Initial Seed Reviews)
 import fs from "fs";
 import path from "path";
 
-const INITIAL_REVIEWS = [
-  {
-    id: "rev-1",
-    name: "Ka",
-    city: "New Delhi",
-    stars: 5,
-    comment: "It is the BEST",
-    badge: "Community Dispatch",
-    createdAt: "2026-10-27T10:00:00.000Z"
-  },
-  {
-    id: "rev-2",
-    name: "Ka",
-    city: "110018",
-    stars: 5,
-    comment: "Its decent",
-    badge: "Verified Order • MAMTAMODERN40",
-    createdAt: "2026-10-27T09:30:00.000Z"
-  },
-  {
-    id: "rev-3",
-    name: "Kanishk Gulati",
-    city: "New Delhi • 110003",
-    stars: 5,
-    comment: "Good",
-    badge: "Verified Order • KANISHK2405",
-    createdAt: "2026-10-27T09:00:00.000Z"
-  },
-  {
-    id: "rev-4",
-    name: "Kanishk Gulati",
-    city: "New Delhi",
-    stars: 5,
-    comment: "Best website for eco shopping.",
-    badge: "Community Dispatch",
-    createdAt: "2026-10-27T08:30:00.000Z"
-  }
-];
+const INITIAL_REVIEWS = []; // Wiped clean of old reviews
 
-const TMP_FILE = path.join("/tmp", "terra_reviews_state_v3.json");
+const TMP_FILE = path.join("/tmp", "terra_reviews_state_v4.json");
 const ADMIN_KEY = (process.env.TERRA_ADMIN_KEY || "kanishk2405").trim();
 const REDIS_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "").trim();
 const REDIS_TOKEN = (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
-const STORAGE_KEY = "terra_global_reviews_state_v3";
-
-// Dedicated Cloud Bucket for TERRA Storefront (stores { reviews, deletedIds })
-const CLOUD_BUCKET_URL = "https://kvdb.io/A6Xy9mPq7Vz2Lk8Wn4Jr1T/terra_global_reviews_state_v3";
+const STORAGE_KEY = "terra_global_reviews_state_v4";
+const CLOUD_BUCKET_URL = "https://kvdb.io/A6Xy9mPq7Vz2Lk8Wn4Jr1T/terra_global_reviews_state_v4";
 
 function normalizeState(raw) {
   if (!raw) return null;
-  if (Array.isArray(raw)) {
-    return { reviews: raw, deletedIds: [] };
-  }
+  if (Array.isArray(raw)) return { reviews: raw, deletedIds: [] };
   if (typeof raw === "object" && Array.isArray(raw.reviews)) {
-    return {
-      reviews: raw.reviews,
-      deletedIds: Array.isArray(raw.deletedIds) ? raw.deletedIds : []
-    };
+    return { reviews: raw.reviews, deletedIds: Array.isArray(raw.deletedIds) ? raw.deletedIds : [] };
   }
   return null;
 }
@@ -81,7 +37,6 @@ function writeTmpState(stateObj) {
 }
 
 async function readStateFromCloud() {
-  // 1. Vercel KV / Upstash Redis (if linked)
   if (REDIS_URL && REDIS_TOKEN) {
     try {
       const res = await fetch(`${REDIS_URL}/get/${STORAGE_KEY}`, {
@@ -99,7 +54,6 @@ async function readStateFromCloud() {
     } catch (e) {}
   }
 
-  // 2. Permanent Cloud KV Bucket (Shared across all users & devices)
   try {
     const res = await fetch(CLOUD_BUCKET_URL, {
       method: "GET",
@@ -115,17 +69,16 @@ async function readStateFromCloud() {
         }
       }
     } else if (res.status === 404) {
-      const initial = { reviews: [...INITIAL_REVIEWS], deletedIds: [] };
+      const initial = { reviews: [], deletedIds: [] };
       await writeStateToCloud(initial);
       return { state: initial, storage: "cloud-db" };
     }
   } catch (e) {}
 
-  // 3. Fallback to /tmp or initial seed
   const cached = readTmpState();
   if (cached) return { state: cached, storage: "cloud-cache" };
 
-  const fallback = { reviews: [...INITIAL_REVIEWS], deletedIds: [] };
+  const fallback = { reviews: [], deletedIds: [] };
   writeTmpState(fallback);
   return { state: fallback, storage: "cloud-cache" };
 }
@@ -141,10 +94,7 @@ async function writeStateToCloud(stateObj) {
     try {
       await fetch(`${REDIS_URL}/set/${STORAGE_KEY}`, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${REDIS_TOKEN}`,
-          "Content-Type": "application/json"
-        },
+        headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
         body: JSON.stringify(JSON.stringify(cleanState))
       });
       return "vercel-kv";
@@ -179,9 +129,9 @@ function mergeState(serverState, clientReviews = [], clientDeletedIds = []) {
     }
   });
 
-  const mergedReviews = Array.from(map.values()).sort((a, b) => {
-    return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
-  });
+  const mergedReviews = Array.from(map.values())
+    .filter(r => !deletedSet.has(r.id))
+    .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
 
   return {
     reviews: mergedReviews,
@@ -208,17 +158,10 @@ export default async function handler(req, res) {
   const isOwnerVerified = Boolean(reqAdminKey && (reqAdminKey === ADMIN_KEY || reqAdminKey === "kanishk2405"));
 
   try {
-    // 1. GET or SYNC
     if (req.method === "GET" || (req.method === "POST" && body.action === "sync")) {
       const { state: serverState, storage } = await readStateFromCloud();
       const merged = mergeState(serverState, body.clientReviews, body.deletedIds);
-
-      if (
-        merged.reviews.length !== serverState.reviews.length ||
-        merged.deletedIds.length !== serverState.deletedIds.length
-      ) {
-        await writeStateToCloud(merged);
-      }
+      await writeStateToCloud(merged);
 
       return res.status(200).json({
         ok: true,
@@ -229,7 +172,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // 2. POST: Any user on any device submits a new review
     if (req.method === "POST" && body.action !== "delete" && body.action !== "edit") {
       const name = String(body.name || "").trim().slice(0, 60);
       const city = String(body.city || "India").trim().slice(0, 60);
@@ -269,25 +211,17 @@ export default async function handler(req, res) {
       });
     }
 
-    // 3. Verify Owner Passkey for Edit & Delete
     if (!isOwnerVerified) {
-      return res.status(401).json({
-        ok: false,
-        errorCode: "UNAUTHORIZED_OWNER",
-        message: "Invalid Owner Passkey. Click Owner Login first."
-      });
+      return res.status(401).json({ ok: false, message: "Unauthorized owner." });
     }
 
-    // 4. PUT (or POST action="edit"): Owner edits a review
     if (req.method === "PUT" || (req.method === "POST" && body.action === "edit")) {
       const targetId = String(body.id || "").trim();
       const { state: serverState } = await readStateFromCloud();
       const merged = mergeState(serverState, body.clientReviews, body.deletedIds);
       const idx = merged.reviews.findIndex(r => r.id === targetId);
 
-      if (idx === -1) {
-        return res.status(404).json({ ok: false, message: "Review not found." });
-      }
+      if (idx === -1) return res.status(404).json({ ok: false, message: "Review not found." });
 
       merged.reviews[idx] = {
         ...merged.reviews[idx],
@@ -300,35 +234,19 @@ export default async function handler(req, res) {
       };
 
       const storage = await writeStateToCloud(merged);
-      return res.status(200).json({
-        ok: true,
-        storage,
-        review: merged.reviews[idx],
-        reviews: merged.reviews,
-        deletedIds: merged.deletedIds
-      });
+      return res.status(200).json({ ok: true, storage, review: merged.reviews[idx], reviews: merged.reviews, deletedIds: merged.deletedIds });
     }
 
-    // 5. DELETE (or POST action="delete"): Owner permanently removes a review
     if (req.method === "DELETE" || (req.method === "POST" && body.action === "delete")) {
       const targetId = String(body.id || req.query?.id || "").trim();
       const { state: serverState } = await readStateFromCloud();
       const nextDeletedIds = [...new Set([...(serverState.deletedIds || []), ...(body.deletedIds || []), targetId])];
       const nextReviews = (serverState.reviews || []).filter(r => r.id !== targetId && !nextDeletedIds.includes(r.id));
 
-      const nextState = {
-        reviews: nextReviews,
-        deletedIds: nextDeletedIds
-      };
+      const nextState = { reviews: nextReviews, deletedIds: nextDeletedIds };
       const storage = await writeStateToCloud(nextState);
 
-      return res.status(200).json({
-        ok: true,
-        storage,
-        deletedId: targetId,
-        reviews: nextState.reviews,
-        deletedIds: nextState.deletedIds
-      });
+      return res.status(200).json({ ok: true, storage, deletedId: targetId, reviews: nextState.reviews, deletedIds: nextState.deletedIds });
     }
 
     return res.status(405).json({ ok: false, message: "Method not allowed" });
